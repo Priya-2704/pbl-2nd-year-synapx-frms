@@ -593,57 +593,6 @@ public:
     void display() { displayRoute(city, &route); }
 };
 
-// Feature F9 : one job, two ways of doing it. the base class says what a
-// planner has to be able to do, the two children say how. build() is a
-// pure virtual so a plain NetworkPlanner cannot be made by mistake, and
-// the loop in routeMenu calls build() without knowing which one it got.
-class NetworkPlanner
-{
-protected:
-    struct CityGraph *city;
-    struct MSTree tree;
-public:
-    NetworkPlanner(struct CityGraph *g) { city = g;  initTree(&tree); }
-    virtual ~NetworkPlanner() { }
-
-    virtual void build(int zones[], int n, int show) = 0;
-    virtual const char* getName() = 0;
-
-    int getTotalKm() { return tree.totalKm; }
-    int getLegs() { return tree.legs; }
-    void display() { displayTree(city, &tree); }
-
-    // the tree total is a lower bound on the trip. any route that
-    // visits every zone is itself a spanning tree of those zones, and
-    // the minimum spanning tree is the cheapest one of those, so no
-    // route can come out shorter than this number.
-    int getLowerBound() { return tree.totalKm; }
-
-    int walkRoute(int start, int order[], int *count)
-    {
-        int seen[TOTAL_ZONES];
-        for (int i = 0; i < TOTAL_ZONES; i++) seen[i] = 0;
-        *count = 0;
-        walkTree(&tree, start, seen, order, count);
-        return routeLength(city, order, *count);
-    }
-};
-
-class PrimPlanner : public NetworkPlanner
-{
-public:
-    PrimPlanner(struct CityGraph *g) : NetworkPlanner(g) { }
-    void build(int zones[], int n, int show) { primMST(city, &tree, zones, n, show); }
-    const char* getName() { return "Prim"; }
-};
-
-class KruskalPlanner : public NetworkPlanner
-{
-public:
-    KruskalPlanner(struct CityGraph *g) : NetworkPlanner(g) { }
-    void build(int zones[], int n, int show) { kruskalMST(city, &tree, zones, n, show); }
-    const char* getName() { return "Kruskal"; }
-};
 
 // Feature S1 : each destination decides for itself what it will take.
 // adding a fourth tier later means writing one more class, the pipeline
@@ -764,6 +713,37 @@ void distanceMenu(struct CityGraph *g)
          << " (" << g->dist[a][near] << " km)" << endl;
 }
 
+// walk the tree out from the start zone and measure what that order costs.
+int walkMST(struct CityGraph *g, struct MSTree *t, int start, int order[], int *count)
+{
+    int seen[TOTAL_ZONES];
+    for (int i = 0; i < TOTAL_ZONES; i++) seen[i] = 0;
+    *count = 0;
+    walkTree(t, start, seen, order, count);
+    return routeLength(g, order, *count);
+}
+
+// print a visiting order as a numbered list, same layout displayRoute
+// uses, so the MST walk and the greedy route look the same on screen.
+void displayOrder(struct CityGraph *g, int order[], int count)
+{
+    cout << "\n  ---- DELIVERY ROUTE (" << count << " stops) ----" << endl;
+    int total = 0;
+    for (int i = 0; i < count; i++)
+    {
+        cout << "  " << (i + 1) << ". " << g->zoneName[order[i]];
+        if (i == 0) cout << "   (start)";
+        else
+        {
+            int leg = g->dist[order[i - 1]][order[i]];
+            total = total + leg;
+            cout << "   (+" << leg << " km)";
+        }
+        cout << endl;
+    }
+    cout << "  Total distance : " << total << " km" << endl;
+}
+
 void routeMenu(struct CityGraph *g)
 {
     int start, howMany;
@@ -805,19 +785,8 @@ void routeMenu(struct CityGraph *g)
     if (dropped > 0) cout << "\n  " << dropped << " repeated zone(s) ignored." << endl;
     if (stops == 0) { cout << "  Nothing left to visit." << endl;  return; }
 
-    // work out what the trip would cost if we just visited the stops
-    // in the order they were typed, so the saving can be compared
-    int naive = 0;
-    int at = start;
-    for (int i = 0; i < stops; i++)
-    {
-        naive = naive + g->dist[at][need[i]];
-        at = need[i];
-    }
-
     DeliveryRoute route(g);
-    route.build(start, need, stops);
-    route.display();        // destructor frees the waypoints on its own
+    route.build(start, need, stops);    // destructor frees the waypoints on its own
 
     // the zone the van starts in has to go into the tree too, or the
     // bound would quietly ignore the first leg of the trip
@@ -826,68 +795,32 @@ void routeMenu(struct CityGraph *g)
     for (int i = 0; i < stops; i++) zones[i + 1] = need[i];
     int n = stops + 1;
 
-    PrimPlanner prim(g);
-    KruskalPlanner kruskal(g);
-    NetworkPlanner *planner[2];
-    planner[0] = &prim;
-    planner[1] = &kruskal;
-
-    int walkKm[2] = { 0, 0 };
-    int bestWalk = 9999, bestWho = 0, bestCount = 0;
+    // both trees still get built and both walks still get measured.
+    // only the running commentary is left out, the last flag turns it off.
+    struct MSTree tree[2];
+    int bestWalk = 9999, bestCount = 0;
     int bestOrder[TOTAL_ZONES];
     for (int i = 0; i < TOTAL_ZONES; i++) bestOrder[i] = start;
 
-    cout << "\n  ---- MINIMUM SPANNING TREE OVER THESE ZONES ----" << endl;
     for (int p = 0; p < 2; p++)
     {
         int order[TOTAL_ZONES], count = 0;
-        cout << "\n    " << planner[p]->getName() << " :" << endl;
-        planner[p]->build(zones, n, 1);         // virtual call, picks the right one
-        planner[p]->display();
-        walkKm[p] = planner[p]->walkRoute(start, order, &count);
-        if (walkKm[p] < bestWalk)
+        initTree(&tree[p]);
+        if (p == 0) primMST(g, &tree[p], zones, n, 0);
+        else        kruskalMST(g, &tree[p], zones, n, 0);
+        int km = walkMST(g, &tree[p], start, order, &count);
+        if (km < bestWalk)
         {
-            bestWalk = walkKm[p];
-            bestWho = p;
+            bestWalk = km;
             bestCount = count;
             for (int i = 0; i < count; i++) bestOrder[i] = order[i];
         }
     }
-    if (prim.getTotalKm() == kruskal.getTotalKm())
-        cout << "\n    both algorithms agree : " << prim.getTotalKm() << " km" << endl;
 
-    // the greedy route and the two tree walks are all guesses. take
+    // the greedy route and the two tree walks are all guesses. show
     // whichever came out shortest, that can never be worse than either.
-    int chosen = route.getTotalKm();
-    const char *how = "greedy nearest neighbour";
-    if (bestWalk < chosen) { chosen = bestWalk;  how = planner[bestWho]->getName(); }
-
-    cout << "\n  ---- ROUTE COMPARISON ----" << endl;
-    cout << "  In the order you typed them : " << naive << " km" << endl;
-    cout << "  Greedy nearest neighbour    : " << route.getTotalKm() << " km" << endl;
-    cout << "  MST walk (Prim)             : " << walkKm[0] << " km" << endl;
-    cout << "  MST walk (Kruskal)          : " << walkKm[1] << " km" << endl;
-    cout << "  Route we will drive         : " << chosen << " km , from " << how << endl;
-    if (bestWalk < route.getTotalKm())
-    {
-        cout << "  MST walk order :" << endl << "   ";
-        for (int i = 0; i < bestCount; i++)
-        {
-            cout << " " << g->zoneName[bestOrder[i]];
-            if (i < bestCount - 1) cout << "  ->";
-        }
-        cout << endl;
-    }
-    cout << "  Saved vs typed order        : " << (naive - chosen) << " km" << endl;
-
-    int bound = prim.getLowerBound();
-    cout << "\n  MST lower bound             : " << bound << " km" << endl;
-    if (chosen == bound)
-        cout << "  No route can beat " << bound
-             << " km, so this one is the best possible." << endl;
-    else
-        cout << "  No route can beat " << bound << " km, so we are at most "
-             << (chosen - bound) << " km off the best possible." << endl;
+    if (bestWalk < route.getTotalKm()) displayOrder(g, bestOrder, bestCount);
+    else                               route.display();
 }
 
 void clockMenu(SimulatedClock *clk)
