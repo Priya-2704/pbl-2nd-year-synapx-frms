@@ -78,8 +78,4 @@ main.cpp              menu
 - Everything is saved to a file, so the data is still there after closing
 - Everything runs from one menu
 
-## What is left
 
-- The sizes are fixed, with room for five requests, fifty scored pairs,
-  eleven hash buckets and six city zones
-- The city map is typed into the code instead of being read from a file
